@@ -1,5 +1,9 @@
 """
-Logistic regression for federated Cox models
+Root imports for the tno.fl.protocols.cox_regression package.
 """
 
-__version__ = "0.2.2"
+# Explicit re-export of all functionalities, such that they can be imported properly. Following
+# https://www.python.org/dev/peps/pep-0484/#stub-files and
+# https://mypy.readthedocs.io/en/stable/command_line.html#cmdoption-mypy-no-implicit-reexport
+
+__version__ = "0.5.5"

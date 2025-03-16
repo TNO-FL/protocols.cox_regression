@@ -1,104 +1,224 @@
 """
-Implementation of survival stacking as described in https://arxiv.org/pdf/2107.13480.pdf.
+This package is used to stack a survival dataset. This allows it to be used
+with a classification method.
+See https://arxiv.org/pdf/2107.13480.pdf for more information.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import numpy.typing as npt
 
+IdsType = npt.NDArray[np.int_]
+CovariatesType = npt.NDArray[np.floating[Any]]
+TimesType = npt.NDArray[np.floating[Any]]
+EventsType = npt.NDArray[np.bool_]
+TimeBinType = TimesType
+DataType = CovariatesType
+TargetType = npt.NDArray[np.bool_]
+
 
 def stack(
-    covariates: npt.NDArray[np.int_ | np.float_],
-    times: npt.NDArray[np.int_ | np.float_],
-    failed: npt.NDArray[np.bool_],
-    ids: npt.NDArray[np.int_] | None = None,
-    time_bins: npt.NDArray[np.float_] | None = None,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
-    """
-    This function stacks a dataset as described in https://arxiv.org/pdf/2107.13480.pdf.
-    The input is in the form of separate numpy arrays. So for patient 1, we have its covariates
-    in covariates[1], its failure time in times[1], and its event indicator in failed[1]. All the
-    arrays should have the same length. Based on the input, the function takes into consideration
-    time-dependency and/or discretization. When using discretization, we always use the situation
-    at the beginning of a time interval. E.g. if a covariate changes within a time interval, this
-    is recorded at the start of the next interval. Hence, if a covariate changes twice during an
-    interval, the intermediate value will be lost. Patients censored within an interval will be
-    recorded as having survived the interval.
+    covariates: CovariatesType,
+    times: TimesType,
+    events: EventsType,
+    time_bins: TimeBinType | None = None,
+) -> tuple[DataType, TargetType]:
+    """This function stacks a dataset as described in https://arxiv.org/pdf/2107.13480.pdf.
+    The input is in the form of separate numpy arrays. So for patient 1, we have its covariates in covariates[0],
+    its failure time in times[0], and its event indicator in failed[0]. All these arrays should have the same length.
+    Time bins allow for discretized stacking, where there is one stacked block for each time bin.
 
     :param covariates: The covariates of the patients. Can have multiple columns.
-    :param times: The failure/censoring times.
-    :param failed: The event indicators. Should contain boolean values.
-    :param ids: The patient ids. Can be used to specify time-varying covariates. The id is unique
-        per patient and a patient can have multiple rows. However, a patient id can have only one
-        failure.
-    :param time_bins: If provided, a discrete stacker is used. The parameter should contain the
-        starting times of each time interval. E.g. [0, 200, 400, 600] denotes time intervals 0-200,
-        200-400, and 400-600. It's first value must be zero, and its largest value must be bigger
-        than the biggest failure/censoring time value.
-    :returns: The stacked data set in the form a multidimensional array containing the input data
-        and a vector containing the target data.
-    :raises ValueError: if the parameter values are inconsistent or not as specified above.
+    :param times: The start time of the time intervals.
+    :param events: The event indicators. Should contain boolean values.
+    :param time_bins: If provided, a discrete stacker is used. The parameter should contain the starting times of each
+        time interval. E.g. [0, 200, 400, 600] denotes time intervals 0-200, 200-400, and 400-600. Time bins are closed
+        on the left and open on the right. That is, 200-400, includes 200, but not 400. It's first value must
+        be zero, and its largest value must be bigger than the biggest failure/censoring time value.
+    :returns: The stacked data set in the form a multidimensional array containing the input data and a vector
+      containing the target data.
     """
-    # Set default value for optional parameter ids. If not set, set unique id per row.
-    ids_ = ids if ids is not None else np.arange(len(covariates))
 
-    # Validate the input
+    # Initialize default parameters
+    ids = np.arange(len(covariates))
+    start_times = np.zeros(len(covariates))
+    end_times = times
+
+    # Return time varying stacked data set
+    return stack_time_varying(
+        ids, covariates, start_times, end_times, events, time_bins
+    )
+
+
+def stack_time_varying(
+    ids: IdsType,
+    covariates: CovariatesType,
+    start_times: TimesType,
+    end_times: TimesType,
+    events: EventsType,
+    time_bins: TimesType | None = None,
+) -> tuple[DataType, TargetType]:
+    """This function stacks a time varying dataset as described in https://arxiv.org/pdf/2107.13480.pdf.
+    The input is in the form of separate numpy arrays. So for the first interval of the first patient, we have
+    its patient id in ids[0], its covariates in covariates[0], the interval times in start_times[0] and
+    end_times[0] and its event indicator in failed[0]. All these arrays should have the same length.
+    Time bins allow for discretized stacking, where there is one stacked block for each time bin. When using
+    discretization, the situation at the beginning of a time interval decides the covariates for that time bin.
+    E.g. if a covariate changes within a time interval, this is recorded at the start of the next interval.
+    Hence, if a covariate changes twice during an interval, the intermediate value will be lost.
+    Patients censored within a time bin will be recorded as having survived the bin.
+    When a patient fails in a time interval, it is recorded as having failed at the end of the time interval.
+
+    :param ids: The patient ids. Can be used to specify time-varying covariates. The id is unique per patient and a
+        patient can have multiple rows. However, a patient id can have only one failure.
+    :param covariates: The covariates of the patients. Can have multiple columns.
+    :param start_times: The start time of the time intervals.
+    :param end_times: The end times of the time intervals.
+    :param events: The event indicators. Should contain boolean values.
+    :param time_bins: If provided, a discrete stacker is used. The parameter should contain the starting times of each
+        time interval. E.g. [0, 200, 400, 600] denotes time intervals 0-200, 200-400, and 400-600. It's first value must
+        be zero, and its largest value must be bigger than the biggest failure/censoring time value.
+    :returns: The stacked data set in the form a multidimensional array containing the input data and a vector
+      containing the target data.
+    """
+
+    # Validate the input - raises a ValueError in case of problems
+    _validate_input(covariates, start_times, end_times, events, ids, time_bins)
+
+    # Normalize the data, filling `ids` and sorting all arrays by time
+    _normalize_data(covariates, start_times, end_times, events, ids)
+
+    # Set defaults for optional parameter time bins.
+    # If not set, set time bins at the failure times in the data.
+    if time_bins is None:
+        time_bins = np.append(
+            np.unique(end_times[np.where(events > 0)]), end_times[-1] + 1
+        )
+
+    # Indices for the `times` array at which the time bins start
+    bin_start_indices = np.array(
+        [np.searchsorted(end_times, bin_start) for bin_start in time_bins]
+    )
+
+    return _stack_using_bins(covariates, events, ids, bin_start_indices)
+
+
+def _validate_input(
+    covariates: CovariatesType,
+    start_times: TimesType,
+    end_times: TimesType,
+    events: EventsType,
+    ids: IdsType,
+    time_bins: TimesType | None = None,
+) -> None:
+    """Validates that the inputs to `stack` are of the correct shape,
+    and that the time bins start at 0, are increasing, and contain all
+    time measurements in the data.
+
+    :param covariates: The covariates of the patients. Can have multiple columns.
+    :param start_times: The start times of the time intervals.
+    :param end_times: The end times of the time intervals.
+    :param events: The event indicators. Should contain boolean values.
+    :param ids: The patient ids. Can be used to specify time-varying covariates.
+        The id is unique per patient and a patient can have multiple rows.
+        However, a patient id can have only one failure.
+    :param time_bins: If provided, a discrete stacker is used.
+        The parameter should contain the starting/ending times of each bin.
+
+    :raises ValueError: if inconsistencies are found, raises a ValueError explaining the problem.
+    """
+
     n_samples = covariates.shape[0]
     if (
-        times.shape != (n_samples,)
-        or failed.shape != (n_samples,)
-        or (ids is not None and ids.shape != (n_samples,))
+        start_times.shape != (n_samples,)
+        or end_times.shape != (n_samples,)
+        or events.shape != (n_samples,)
+        or ids.shape != (n_samples,)
     ):
         raise ValueError("Not all parameters have the same lengths.")
+
+    if np.min(end_times) <= 0:
+        raise ValueError("All failure times must be greater than 0.")
+    if np.min(start_times) < 0:
+        raise ValueError("All start times must be positive.")
+    if not (start_times < end_times).all():
+        raise ValueError("End times should be strictly greater than the start times.")
 
     if time_bins is not None:
         if any(time_bins[i] >= time_bins[i + 1] for i in range(len(time_bins[:-1]))):
             raise ValueError("Time bins must be a strictly increasing sequence.")
-        if time_bins[0] != 0:
-            raise ValueError("First time bin should start at 0.")
-        if time_bins[-1] < np.max(times):
+        if time_bins[-1] < np.max(end_times):
             raise ValueError("The maximum time value is larger than the last time bin.")
 
+
+def _normalize_data(
+    covariates: CovariatesType,
+    start_times: TimesType,
+    end_times: TimesType,
+    events: EventsType,
+    ids: IdsType,
+) -> None:
+    """Sort the data by event time, and generate IDs if necessary
+
+    :param covariates: The covariates of the patients. Can have multiple columns.
+    :param start_times: The start times of the time intervals.
+    :param end_times: The end times of the time intervals.
+    :param events: The event indicators.
+    :param ids: The patient ids. Can be used to specify time-varying covariates.
+    """
+
     # Sort the data by time
-    permutation = times.argsort()
-    covariates = covariates[permutation]
-    times = times[permutation]
-    failed = failed[permutation]
-    ids = ids_[permutation]
+    permutation = end_times.argsort()
+    np.copyto(covariates, covariates[permutation])
+    np.copyto(start_times, start_times[permutation])
+    np.copyto(end_times, end_times[permutation])
+    np.copyto(events, events[permutation])
+    np.copyto(ids, ids[permutation])
 
-    # Set defaults for optional parameter time bins.
-    # If not set, set time bins at the failure times in the data.
-    time_bins = (
-        time_bins
-        if time_bins is not None
-        else np.append(times[np.where(failed > 0)], times[-1] + 1)
-    )
 
-    # Useful variables
-    bin_start_indices = np.array(
-        [np.searchsorted(times, bin_start) for bin_start in time_bins]
-    )
+def _stack_using_bins(
+    covariates: CovariatesType,
+    events: EventsType,
+    ids: IdsType,
+    bin_start_indices: npt.NDArray[np.intp],
+) -> tuple[DataType, TargetType]:
+    """Uses the prepared bins to stack the data.
+    All data should be sorted based on the failure times of the corresponding patients.
+
+    :param covariates: The covariates of the patients.
+    :param events: The event indicators.
+    :param ids: The patient ids. Can be used to specify time-varying covariates.
+    :param bin_start_indices: Indices into the arrays at which a new time bin starts.
+    :return: Stacked data set matrix and corresponding failure vector, to be used as input
+        to train a classifier.
+    """
+
+    # Number of patients still active (uncensored and unfailed) in each time bin
     risk_sets_size = np.array(
         [
-            len(np.unique(ids_[start_idx:], return_index=True)[1])
+            len(np.unique(ids[start_idx:], return_index=True)[1])
             for start_idx in bin_start_indices
         ]
     )
+
+    # Store number of covariates and time bins
     n_covariates = covariates.shape[1]
     n_time_bins = len(bin_start_indices) - 1
 
     # Allocate memory for stacked dataset
     size_of_stacked_dataset = np.sum(risk_sets_size)
     stacked = np.zeros((size_of_stacked_dataset, n_covariates + n_time_bins))
-    target = np.zeros(size_of_stacked_dataset, dtype=np.bool_)
+    target = np.zeros(size_of_stacked_dataset)
 
     # Fill the matrix time bin after time bin
     offset = 0
     for bin_idx, bin_start_idx in enumerate(bin_start_indices[:-1]):
         # Compute risk set
         risk_set_ids, risk_set_indices = np.unique(
-            ids_[bin_start_idx:], return_index=True
+            ids[bin_start_idx:], return_index=True
         )
         risk_set_size = risk_sets_size[bin_idx]
         # Fill in the covariates
@@ -106,16 +226,12 @@ def stack(
             risk_set_indices + bin_start_idx
         ]
         # Fill in the risk set indicators
-        stacked[
-            offset : offset + risk_set_size, n_covariates + bin_idx
-        ] = 1  # times[bin_start_idx]
+        stacked[offset : offset + risk_set_size, n_covariates + bin_idx] = 1
         # Update the target matrix (failed for events in time bin, leave 0 for all others)
         bin_end_idx = bin_start_indices[bin_idx + 1]
-        failed_ids = ids_[
-            np.where(failed[bin_start_idx:bin_end_idx])[0] + bin_start_idx
-        ]
+        failed_ids = ids[np.where(events[bin_start_idx:bin_end_idx])[0] + bin_start_idx]
         failed_in_bin_indices = np.where(np.isin(risk_set_ids, failed_ids))[0] + offset
         target[failed_in_bin_indices] = 1
         # Keep track of where we are in updating the stacked matrix and target vector
         offset = offset + risk_set_size
-    return stacked, target
+    return stacked, target.astype(bool)
